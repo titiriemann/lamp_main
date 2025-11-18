@@ -20,34 +20,64 @@ chown -R mysql:mysql "$DATADIR" /run/mysqld
 if [ ! -d "$DATADIR/mysql" ]; then
   echo "[INFO] Inicializando MariaDB en $DATADIR"
   mariadb-install-db --user=mysql --datadir="$DATADIR" > /dev/null
+
+  echo "[INFO] Levantando MariaDB en modo init..."
+  mysqld_safe --datadir="$DATADIR" --socket="$SOCKET" --bind-address=127.0.0.1 --port=3306 &
+  INIT_PID=$!
+
+  for i in {60..0}; do
+    if mysqladmin --socket="$SOCKET" ping &>/dev/null; then
+      echo "[INFO] MariaDB está arriba (init)."
+      break
+    fi
+    echo "[INFO] Esperando a MariaDB (init)... ($i)"
+    sleep 1
+  done
+
+  echo "[INFO] Configurando contraseña de root (primera vez, sin password)..."
+  mysql --socket="$SOCKET" <<EOSQL
+ALTER USER 'root'@'localhost' IDENTIFIED BY '${MARIADB_ROOT_PASSWORD}';
+FLUSH PRIVILEGES;
+EOSQL
+
+  echo "[INFO] Creando BD y usuario ${MARIADB_USER} (init)..."
+  mysql --socket="$SOCKET" -uroot -p"${MARIADB_ROOT_PASSWORD}" <<EOSQL
+CREATE DATABASE IF NOT EXISTS \`${MARIADB_DATABASE}\`
+  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE USER IF NOT EXISTS '${MARIADB_USER}'@'localhost' IDENTIFIED BY '${MARIADB_PASSWORD}';
+CREATE USER IF NOT EXISTS '${MARIADB_USER}'@'%'         IDENTIFIED BY '${MARIADB_PASSWORD}';
+
+GRANT ALL PRIVILEGES ON \`${MARIADB_DATABASE}\`.* TO '${MARIADB_USER}'@'localhost';
+GRANT ALL PRIVILEGES ON \`${MARIADB_DATABASE}\`.* TO '${MARIADB_USER}'@'%';
+FLUSH PRIVILEGES;
+EOSQL
+
+  echo "[INFO] Apagando MariaDB de inicialización..."
+  mysqladmin --socket="$SOCKET" -uroot -p"${MARIADB_ROOT_PASSWORD}" shutdown
+  wait "$INIT_PID"
 fi
 
 ########################################
 # 2) Arranque normal
 ########################################
-echo "[INFO] Levantando MariaDB..."
-mysqld_safe --datadir="$DATADIR" --socket="$SOCKET" --bind-address=127.0.0.1 --port=3306 &
+echo "[INFO] Levantando MariaDB (normal)..."
+mysqld_safe --datadir="$DATADIR" --socket="$SOCKET" --bind-address=0.0.0.0 --port=3306 &
 MYSQL_PID=$!
 
 for i in {60..0}; do
-  if mysqladmin --socket="$SOCKET" ping &>/dev/null; then
-    echo "[INFO] MariaDB está arriba."
+  if mysqladmin --socket="$SOCKET" -uroot -p"${MARIADB_ROOT_PASSWORD}" ping &>/dev/null; then
+    echo "[INFO] MariaDB está arriba (normal)."
     break
   fi
-  echo "[INFO] Esperando a MariaDB... ($i)"
+  echo "[INFO] Esperando a MariaDB (normal)... ($i)"
   sleep 1
 done
 
 ########################################
-# 3) Siempre sincronizar root + usuario app
+# 3) Ajustar siempre BD y usuario de aplicación
 ########################################
-echo "[INFO] Ajustando usuario root y ${MARIADB_USER}..."
-mysql --socket="$SOCKET" <<EOSQL
-ALTER USER 'root'@'localhost' IDENTIFIED BY '${MARIADB_ROOT_PASSWORD}'
-  PASSWORD EXPIRE NEVER;
-FLUSH PRIVILEGES;
-EOSQL
-
+echo "[INFO] Ajustando BD ${MARIADB_DATABASE} y usuario ${MARIADB_USER}..."
 mysql --socket="$SOCKET" -uroot -p"${MARIADB_ROOT_PASSWORD}" <<EOSQL
 CREATE DATABASE IF NOT EXISTS \`${MARIADB_DATABASE}\`
   CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -63,6 +93,9 @@ GRANT ALL PRIVILEGES ON \`${MARIADB_DATABASE}\`.* TO '${MARIADB_USER}'@'%';
 FLUSH PRIVILEGES;
 EOSQL
 
+########################################
+# 4) Levantar Apache
+########################################
 echo "[INFO] Levantando Apache..."
 apache2-foreground &
 APACHE_PID=$!
